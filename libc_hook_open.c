@@ -10,26 +10,29 @@
 #include <sys/cdefs.h>
 #include <sys/errno.h>
 
-#define DEBUG 0
+/* Hooking the actual Mach libc implementation of open()/close() et al. (which
+ * may in fact be implemented by open_nocancel, close_nocancel, etc.) also
+ * prevents *anything* which calls open() (including (f)printf(), fopen(),
+ * etc.) from running, as otherwise the function-call gets stuck in a loop.
+ */
+//#define HOOK_IMPLEMENTATION 1
+#undef HOOK_IMPLEMENTATION
+
+//#define DEBUG 1
+#undef DEBUG
+
 
 #if DEBUG
 # define debug_fprintf(stream, fmt, ...) \
 	do { if (DEBUG) fprintf( stream, "%s:%d:%s(): " fmt, __FILE__, \
 		__LINE__, __func__, __VA_ARGS__); } while (0) // C99
-# define TRACE(x) do { if (DEBUG) dbg_printf x; } while (0) // C89
+# define verbose_fprintf(stream, fmt, ...) \
+	do { if (DEBUG) fprintf( stream, fmt, __VA_ARGS__); } while (0) // C99
 #else
 # define debug_fprintf(stream, fmt, ...)
-# define TRACE(x)
+# define verbose_fprintf(stream, fmt, ...)
 #endif
 
-
-/* Hooking the actual Mach libc implementation of open()/close() et al. (which
- * may in fact be implemented by open_nocancel, close_nocancel, etc.) also
- * prevents *anything* which calls open() (including (f)printf(), fopen(),
- * etc.) from running, as the function-call gets stuck in a loop.
- */
-//#define HOOK_IMPLEMENTATION 1
-#undef HOOK_IMPLEMENTATION
 
 #ifdef HOOK_IMPLEMENTATION
 # define fprintf(s, f, ...)
@@ -67,9 +70,9 @@
 #  endif
 #endif // !__DARWIN_NON_CANCELABLE
 
-#define DYLD_INTERPOSE(_replacment,_replacee) \
-	__attribute__((used)) static struct{ const void* replacment; const void* replacee; } _interpose_##_replacee \
-	__attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long)&_replacment, (const void*)(unsigned long)&_replacee }; 
+#define DYLD_INTERPOSE(_replacement,_replacee) \
+	__attribute__((used)) static struct{ const void* replacement; const void* replacee; } _interpose_##_replacee \
+	__attribute__ ((section ("__DATA,__interpose"))) = { (const void*)(unsigned long)&_replacement, (const void*)(unsigned long)&_replacee };
 
 #define IS_SIGNED(type) ((type)-1 < (type)0)
 #define DECIMAL_FORMAT(type) (IS_SIGNED(type) ? "%jd" : "%ju")
@@ -91,111 +94,101 @@ int hooked_close(int);
 #endif
 
 
-/* Usage:
- *
- * TRACE(("message %d\n", var));
- *
- * ... the double-parentheses are crucial — and are why you have the funny
- * notation in the macro expansion.  The compiler always checks the code for
- * syntactic validity (which is good) but the optimizer only invokes the
- * print function if the DEBUG macro evaluates to non-zero.
- */
-void dbg_printf(const char *fmt, ...) {
-	va_list args;
-	va_start( args, fmt);
-		vfprintf( stderr, fmt, args );
-	va_end( args );
-}
-
 int capitalisepath(const char *string, char **result) {
 	unsigned char lastchar = 0;
 	unsigned long len;
 
-	debug_fprintf( stderr, "capitalisepath starting with '%s'\n", string );
+	//debug_fprintf( stderr, "capitalisepath starting with '%s'\n", string );
 
 	/* strlen(string) should be less than PATH_MAX, but this isn't enforced
 	 * anywhere...
 	 */
 	errno = 0;
-	if(( *result = (char *)malloc( strlen( string ) + 1 ) )) {
-		/* We can assume that the path won't be longer than 4 thousand million
-		 * characters... ?
-		 */
-		unsigned int max;
-		for( max = strlen( string ) - 1 ; max > 0 ; --max ) {
-			unsigned char c = string[ max ];
 
-			debug_fprintf( stderr, "capitalisepath read char %c\n", c );
-
-			if( c == '/' )
-				break;
-		}
-
-		debug_fprintf( stderr, "capitalisepath last separator is at %d\n", max );
-
-		for( unsigned int n = 0 ; n < max ; n++ ) {
-			unsigned char c = string[ n ];
-
-			debug_fprintf( stderr, "capitalisepath read char %c\n", c );
-
-			if( 0 == c )
-				break;
-			if( 0 == n ) {
-				lastchar = c;
-				if( lastchar != '/' )
-					(*result)[ n ] = toupper( c );
-				else
-					(*result)[ n ] = c;
-			} else {
-				if( lastchar == '/' || lastchar == ' ' )
-					(*result)[ n ] = toupper( c );
-				else
-					(*result)[ n ] = c;
-				lastchar = c;
-
-				debug_fprintf( stderr, "capitalisepath using char %c\n", (*result)[ n ] );
-			}
-
-			debug_fprintf( stderr, "capitalisepath lastchar is %c\n", lastchar );
-		}
-		for( ; max < strlen( string ) ; max++ ) {
-			unsigned char c = string[ max ];
-			(*result)[ max ] = c;
-
-			debug_fprintf( stderr, "capitalisepath appending char %c\n", c );
-		}
-		(*result)[ strlen( string ) ] = '\0';
-
-		debug_fprintf( stderr, "capitalisepath string is %s\n", *result );
-
-		len = strlen( *result );
-
-		debug_fprintf( stderr, "capitalisepath returning %lu\n", len );
-
-		if( len > INT_MAX ) {
-			return 0;
-		} else {
-			return (int)len;
-		}
-	} else {
+	if( !( *result = (char *)malloc( strlen( string ) + 1 ) ) ) {
 		debug_fprintf( stderr, "capitalisepath malloc failed with error %d: %s\n", errno, strerror( errno ) );
 
-		if( 0 == errno )
-			errno = ENOMEM;
+		return -1;
 	}
 
-	return -1;
+	/* We can assume that the path won't be longer than 4 thousand million
+	 * characters... ?
+	 */
+	unsigned int max;
+	for( max = strlen( string ) - 1 ; max > 0 ; --max ) {
+		unsigned char c = string[ max ];
+
+		//debug_fprintf( stderr, "capitalisepath read char %c\n", c );
+
+		if( c == '/' )
+			break;
+	}
+
+	//debug_fprintf( stderr, "capitalisepath last separator is at %d\n", max );
+
+	for( unsigned int n = 0 ; n < max ; n++ ) {
+		unsigned char c = string[ n ];
+
+		//debug_fprintf( stderr, "capitalisepath read char %c\n", c );
+
+		if( 0 == c )
+			break;
+		if( 0 == n ) {
+			lastchar = c;
+			if( lastchar != '/' )
+				(*result)[ n ] = toupper( c );
+			else
+				(*result)[ n ] = c;
+		} else {
+			if( lastchar == '/' || lastchar == ' ' )
+				(*result)[ n ] = toupper( c );
+			else
+				(*result)[ n ] = c;
+			lastchar = c;
+
+			//debug_fprintf( stderr, "capitalisepath using char %c\n", (*result)[ n ] );
+		}
+
+		//debug_fprintf( stderr, "capitalisepath lastchar is %c\n", lastchar );
+	}
+	for( ; max < strlen( string ) ; max++ ) {
+		unsigned char c = string[ max ];
+		(*result)[ max ] = c;
+
+		//debug_fprintf( stderr, "capitalisepath appending char %c\n", c );
+	}
+	(*result)[ strlen( string ) ] = '\0';
+
+	//debug_fprintf( stderr, "capitalisepath string is %s\n", *result );
+
+	len = strlen( *result );
+
+	//debug_fprintf( stderr, "capitalisepath returning %lu\n", len );
+
+	if( len > INT_MAX ) {
+		return 0;
+	} else {
+		return (int)len;
+	}
+
+	/*
+	 * Unreachable
+	 */
 }  // capitalisepath
 
-int hooked_open(const char *pathname, int flags, ...) {
-	mode_t mode;
-	int m = 0;
+int hooked_open(const char *path, int flags, ...) {
+	char *pathname;
+	unsigned long size;
+
+	unsigned char m = 0;
 	int o;
+
+	mode_t mode;
 	va_list ap;
 
 	va_start( ap, flags );
 			switch( sizeof( mode_t ) ) {
-				case 1:  mode = va_arg(ap, int); break;
+				case 1: mode = va_arg(ap, int); break;
 				case 2: mode = va_arg(ap, int); break;
 				case 4: mode = va_arg(ap, long); break;
 				case 8: mode = va_arg(ap, long long); break;
@@ -207,44 +200,49 @@ int hooked_open(const char *pathname, int flags, ...) {
 			m = 1;
 	va_end( ap );
 
+	size = strlen( path ) + 1;
+	if( !( pathname = malloc( size ) ) )
+		return -1;
+	if( strlcpy( pathname, path, size ) != size - 1 ) {
+		errno = EOVERFLOW;
+		return -1;
+	}
+
 	if( 1 == m ) {
-		fprintf( stderr, "->  Intercepted three-arg open('%s', %d, %ju)", pathname, flags, CONVERT_TO_MAX(mode_t, mode) );
+		verbose_fprintf( stderr, "->  Intercepted three-arg open('%s', %d, %ju)", pathname, flags, CONVERT_TO_MAX(mode_t, mode) );
 	} else {
-		fprintf( stderr, "->  Intercepted two-arg open('%s', %d)", pathname, flags );
+		verbose_fprintf( stderr, "->  Intercepted two-arg open('%s', %d)", pathname, flags );
 	}
 
 	if( flags & O_CREAT ) {
-#if DEBUG
-		fprintf( stderr, ".\n--> File '%s' will be created\n", pathname );
-#endif
+		verbose_fprintf( stderr, "\n--> File '%s' will be created", pathname );
+		verbose_fprintf( stderr, "\n--> %s", "open()" ); // must have >=3 args
 	} else if( flags & ( O_CREAT | O_EXCL ) ) {
-#if DEBUG
-		fprintf( stderr, ".\n--> File '%s' will be created if it doesn't exist\n", pathname );
-#endif
+		verbose_fprintf( stderr, "\n--> File '%s' will be created if it doesn't exist", pathname );
+		verbose_fprintf( stderr, "\n--> %s", "open()" ); // must have >=3 args
 	} else {
 		if( ( o = open_implementation( pathname, O_NONBLOCK | O_EVTONLY ) ) >= 0 ) {
 			close( o );
-#if DEBUG
-			fprintf( stderr, ".\n--> File '%s' exists (%d)\n", pathname, o );
-			fprintf( stderr, "--> open()" );
-#endif
+			verbose_fprintf( stderr, "\n--> File '%s' exists (%d)", pathname, o );
+			verbose_fprintf( stderr, "\n--> %s", "open()" ); // must have >=3 args
 		} else {
 			char *newpath;
 
-			fprintf( stderr, ".\n--> File '%s' does not exist\n", pathname );
+			verbose_fprintf( stderr, "\n--> File '%s' does not exist\n", pathname );
 
 			if( capitalisepath( pathname, &newpath ) >= 0 ) {
-				// debug_fprintf( stderr, "--> %s\n", "Got back" ); // must have >=3 args
-				debug_fprintf( stderr, "--> Corrected path is '%s'\n", newpath );
+				verbose_fprintf( stderr, "--> Corrected path is '%s'\n", newpath );
 				if( ( o = open_implementation( newpath, O_NONBLOCK | O_EVTONLY ) ) >= 0 ) {
 					close( o );
-					fprintf( stderr, "--> Corrected file '%s' exists\n", newpath );
-					pathname = newpath;
+					verbose_fprintf( stderr, "--> Corrected file '%s' exists\n", newpath );
+					strlcpy( pathname, newpath, strlen( pathname ) + 1 );
 				} else {
-					fprintf( stderr, "--> Corrected file '%s' does not exist\n", newpath );
+					verbose_fprintf( stderr, "--> Corrected file '%s' does not exist\n", newpath );
 				}
+
+				free( newpath );
 			}
-			fprintf( stderr, "--> open()" );
+			verbose_fprintf( stderr, "--> %s", "open()" );
 		}
 	}
 
@@ -253,10 +251,13 @@ int hooked_open(const char *pathname, int flags, ...) {
 	} else {
 		o = open_implementation( pathname, flags );
 	}
+
+	free( pathname );
+
 	if( o >= 0 ) {
-		fprintf( stderr, ": %d\n", o );
+		verbose_fprintf( stderr, ": %d\n", o );
 	} else {
-		fprintf( stderr, ": %s\n", strerror( errno ) );
+		verbose_fprintf( stderr, ": %s\n", strerror( errno ) );
 	}
 
 	return o;
@@ -269,12 +270,12 @@ int hooked_open(const char *pathname, int flags, ...) {
 int hooked_close(int fd) {
 	int c = 0;
 
-	fprintf( stderr, "->  Intercepted close(%d)", fd );
+	verbose_fprintf( stderr, "->  Intercepted close(%d)", fd );
 	c = close_implementation( fd );
 	if( c >= 0 ) {
-		fprintf( stderr, ": %d\n", c );
+		verbose_fprintf( stderr, ": %d\n", c );
 	} else {
-		fprintf( stderr, ": %d - %s\n", c, strerror( errno ) );
+		verbose_fprintf( stderr, ": %d - %s\n", c, strerror( errno ) );
 	}
 
 	return c;
